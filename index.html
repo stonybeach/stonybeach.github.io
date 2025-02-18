@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<title>术语表制作工具</title>
+<!-- Latest compiled and minified CSS -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@3.3.7/dist/css/bootstrap.min.css" integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u" crossorigin="anonymous">
+<style>
+</style>
+<script>
+
+const re = /[\u30a1-\u30fa\u30fc-\u30fe]+/g;
+const sakuraGroup = 10;
+const jmDictKataUrl = 'https://raw.githubusercontent.com/stonybeach/sgm/refs/heads/main/JMdict_kata';
+
+async function loadJmDictKata(minWordLength) {
+  const response = await fetch(jmDictKataUrl);
+  const body = await response.text();
+  const lines = body.split('\n');
+  const s = {};
+  for (i in lines) {
+    word = lines[i].trim();
+    if (word.length >= minWordLength) {
+      // addWordTree(s, lines[i].trim());
+      var current = s;
+      for (var i=0; i<word.length; i++) {
+        const c = word.charAt(i);
+        if (!current[c]) {
+          current[c] = {};
+        }
+        current = current[c];
+      }
+      current['xx'] = 1;
+    }
+  }
+  return {
+    dict: s,
+
+    preWordTree: function (word) {
+      var current = this.dict;
+      // var debug = '';
+      for (var i=0; i<word.length; i++) {
+        const c = word.charAt(i);
+        // debug += c;
+        if (!current[c]) {
+          if ((i>0) && current['xx']){
+            return word.substr(i);
+          } else {
+            return undefined;
+          }
+        }
+        current = current[c];
+      }
+      if(current['xx']){
+        return '';
+      } else {
+        return undefined;
+      }
+    },
+
+    isWords: function (word) {
+      var remaining = this.preWordTree(word);
+      if (remaining == undefined) {
+        return false;
+      } else if (remaining == '') {
+        // console.log("is word: " + word);
+        return true;
+      } else if (remaining.length == 1) {
+        return false;
+      } else if (word == remaining) {
+        console.log("detected bug: " + word);
+        return false;
+      } else {
+        // console.log("is word: " + word.substr(0, word.length - remaining.length));
+        return this.isWords(remaining);
+      }
+    }
+  };
+}
+
+function addList (dict, line, counter) {
+  const items = line.match(re);
+  for (i in items) {
+    const item = items[i];
+    if (!dict[item] || dict[item].length < line.length) {
+      dict[item] = line;
+    }
+    if (counter[item]) {
+      counter[item]++;
+    } else {
+      counter[item] = 1;
+    }
+  }
+  return dict;
+}
+
+function printTransDict (transDict) {
+  var s = ""
+  for (var key in transDict) {
+    if (Object.hasOwn (transDict, key)) {
+      s += key + " => " + transDict[key] + "\n";
+    }
+  }
+  return s;
+}
+
+const translator = {
+  minWordLength: 2,
+  minCount: 2,
+  serverUrl: 'http://localhost:8080',
+  indexUrl: 'https://books.fishhawk.top/novel/syosetu/n1165js',
+
+  filterKata: function (word, count) {
+    if (word.length < this.minWordLength) {
+      return true;
+    } else if (word.endsWith('ッ')) {
+      return true;
+    } else if (count < this.minCount) {
+      return true;
+    } else {
+      return false;
+    }
+  },
+
+  sakura: async function (sample_text, ja_text) {
+    var system_prompt = "你是一个轻小说翻译模型，可以流畅通顺地以日本轻小说的风格将日文翻译成简体中文，并联系上下文正确使用人称代词，不擅自添加原文中没有的代词。";
+    var user_prompt = "将下面的日文词语翻译成中文，专有名称请使用音译，不要使用英文或日文：";
+    var url = this.serverUrl + "/v1/chat/completions";
+    const bodyObj = {
+      "model":"",
+      "messages":[
+        {
+            "role":"system",
+            "content": system_prompt
+        }, {
+            "role":"user",
+            "content": sample_text + user_prompt + ja_text
+        }],
+      "temperature":0.1,
+      "top_p":0.3,
+      "max_tokens":1000,
+      "frequency_penalty":0
+    }
+    const params = {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(bodyObj)
+    }
+    // console.log("translating:\n" + ja_text);
+    const response = await fetch(url, params);
+    const body = await response.text();
+    const data = JSON.parse(body);
+    return data['choices'][0]['message']['content'].split('\n');
+  },
+
+  translate: async function (kataDict, transDict) {
+    var ja_text = "";
+    var sample_text = "分析以下日文文本中使用的词语：\n";
+    var n = 1;
+    var index = 1;
+    var words = Object.keys(kataDict);
+    var last = words.length;
+    var mapping = {};
+    for (var i in words) {
+      const word = words[i];
+      if (Object.hasOwn(kataDict, word)) {
+        ja_text += String(index) + '.' + word + '\n';
+        mapping[index] = word;
+        const sample = kataDict[word];
+        if (sample && sample.length > 0) {
+          sample_text += sample + '\n';
+        }
+        if ((index >= sakuraGroup) || (n >= last)) {
+          // const results = await this.sakura ('', ja_text);
+          const results = await this.sakura (sample_text, ja_text);
+          for (li in results) {
+            const lis = results[li].split('.');
+            if (lis.length == 2) {
+              const lisi = Number(lis[0]);
+              if (lisi) {
+                transDict[mapping[lisi]] = lis[1];
+              }
+            }
+          }
+          ja_text = "";
+          sample_text = "分析以下日文文本：\n";
+          index = 0;
+        }
+        index++;
+      }
+      n++;
+    }
+  },
+
+  process: async function () {
+    const jmDict = await loadJmDictKata(this.minWordLength);
+    const re = /[\u30a1-\u30fa\u30fc-\u30fe]+/g;
+    const kataDict = {};
+    const counter = {};
+    const transDict = {};
+    const apiUrl = this.indexUrl.replace('/novel','/api/novel').replace('https://books.fishhawk.top/','http://localhost:8000/');
+    const response = await fetch(apiUrl);
+    const body = await response.text();
+    const index = JSON.parse(body);
+    const title = index['titleJp'];
+    console.log("loaded " + title);
+    addList(kataDict, title, counter);
+    const toc = index['toc'];
+    const glossary = index['glossary'];
+    for (var ch in toc) {
+      const cid = toc[ch]['chapterId'];
+      if (cid) {
+        const url = apiUrl + '/chapter/' + cid;
+        const chResponse = await fetch(url);
+        const chBody = await chResponse.text();
+        const chData = JSON.parse(chBody);
+        const chTitle = chData["titleJp"];
+        console.log("loaded " + chTitle);
+        addList(kataDict, chTitle, counter);
+        const paragraphs = chData['paragraphs']
+        for (var p in chData['paragraphs']) {
+          const line = paragraphs[p];
+          addList(kataDict, line, counter);
+        }
+      }
+    }
+    for (var kata in kataDict) {
+      if (Object.hasOwn(kataDict, kata)) {
+        const count = counter[kata];
+        if (Object.hasOwn(glossary, kata) || this.filterKata(kata, count) || jmDict.isWords(kata)) {
+          delete kataDict[kata];
+        }
+      }
+    }
+    await this.translate (kataDict, transDict);
+    document.getElementById('results').innerText = printTransDict(transDict);
+  }
+
+};
+
+function startProcess() {
+  translator.serverUrl = document.getElementById('sakuraUrl').value;
+  translator.indexUrl = document.getElementById('novelUrl').value;
+  translator.minWordLength = Number(document.getElementById('minWordLength').value);
+  translator.minCount = Number(document.getElementById('minCount').value);
+  (async () => {
+    translator.process();
+  })();
+}
+
+function copyResults() {
+  var copyText = document.getElementById("results").innerText;
+  navigator.clipboard.writeText(copyText);
+}
+
+</script>
+</head>
+<body class="bg-light">
+  <div class="container">
+    <div class="py-5 text-center">
+       <h2>术语表制作工具</h2>
+    </div>
+    <div class="row">
+       <div class="col-md-12 order-md-1">
+         <form>
+           <div>
+            <label for="novelUrl"><h4>绿站网络小说 URL:</h4></label>
+            <p>
+              <input type="text" class="form-control" id="novelUrl" placeholder="https://books.fishhawk.top/novel/syosetu/n1165js" value="https://books.fishhawk.top/novel/syosetu/n1165js" required>
+            </p>
+            <label for="sakuraUrl"><h4>Sakura 翻译器 URL:</h4></label>
+            <p>
+              <input type="text" class="form-control" id="sakuraUrl" placeholder="http://localhost:8080" value="http://localhost:8080" required>
+            </p>
+            <div class="row">
+              <div class="col-md-6 mb-3">
+               <label for="minWordLength"><h4>最少字数：</h4></label>
+               <p>
+               <input type="text" class="form-control" id="minWordLength" placeholder="3" value="3" required>
+               </p>
+             </div>
+             <div class="col-md-6 mb-3">
+               <label for="minCount"><h4>最少出现次数：</h4></label>
+               <p>
+               <input type="text" class="form-control" id="minCount" placeholder="2" value="2" required>
+               </p>
+             </div>
+            </div>
+            <p>
+              <button type="button" class="btn btn-lg btn-default" onclick="javascript:startProcess();">开始</button>
+            </p>
+          </div>
+         </form>
+         <div class="page-header">
+           <h3>制作结果:</h3>
+         </div>
+         <p>
+           <button type="button" class="btn btn-default" onclick="javascript:copyResults();">复制</button>
+         </p>
+         <div class="well">
+           <p id="results"></p>
+         </div>
+       </div>
+    </div>
+
+  </div>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.12.4/jquery.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@3.3.7/dist/js/bootstrap.min.js" integrity="sha384-Tc5IQib027qvyjSMfHjOMaLkfuWVxZxUPnCJA7l2mCWNIpG9mGCD8wGNIcPD7Txa" crossorigin="anonymous"></script>
+</body>
+</html>
