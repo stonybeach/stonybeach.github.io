@@ -4,8 +4,7 @@
 <meta charset="utf-8">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-<title>术语表制作工具</title>
-<!-- Latest compiled and minified CSS -->
+<title>Sakura 术语表制作工具</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@3.3.7/dist/css/bootstrap.min.css" integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u" crossorigin="anonymous">
 <style>
 </style>
@@ -15,11 +14,17 @@ const re = /[\u30a1-\u30fa\u30fc-\u30fe]+/g;
 const sakuraGroup = 10;
 const jmDictKataUrl = 'https://raw.githubusercontent.com/stonybeach/sgm/refs/heads/main/JMdict_kata';
 
+function logStatus (status) {
+  document.getElementById('status').innerText = status;
+  console.log(status);
+}
+
 async function loadJmDictKata(minWordLength) {
   const response = await fetch(jmDictKataUrl);
   const body = await response.text();
   const lines = body.split('\n');
   const s = {};
+  logStatus("加载日语字典");
   for (i in lines) {
     word = lines[i].trim();
     if (word.length >= minWordLength) {
@@ -40,6 +45,7 @@ async function loadJmDictKata(minWordLength) {
 
     preWordTree: function (word) {
       var current = this.dict;
+      var last = 0;
       // var debug = '';
       for (var i=0; i<word.length; i++) {
         const c = word.charAt(i);
@@ -47,34 +53,44 @@ async function loadJmDictKata(minWordLength) {
         if (!current[c]) {
           if ((i>0) && current['xx']){
             return word.substr(i);
+          } else if (last != 0) {
+            return word.substr(last);
           } else {
             return undefined;
           }
+        }
+        if (current['xx']) {
+          last = i;
         }
         current = current[c];
       }
       if(current['xx']){
         return '';
+      } else if (last != 0) {
+        return word.substr(last);
       } else {
         return undefined;
       }
     },
 
     isWords: function (word) {
+      var l = word.length;
       var remaining = this.preWordTree(word);
       if (remaining == undefined) {
         return false;
       } else if (remaining == '') {
         // console.log("is word: " + word);
         return true;
-      } else if (remaining.length == 1) {
+      } else if (remaining.length < 3) {
         return false;
       } else if (word == remaining) {
         console.log("detected bug: " + word);
         return false;
-      } else {
+      } else if (l - remaining.length > 2) {
         // console.log("is word: " + word.substr(0, word.length - remaining.length));
         return this.isWords(remaining);
+      } else {
+        return false;
       }
     }
   };
@@ -96,11 +112,20 @@ function addList (dict, line, counter) {
   return dict;
 }
 
+function isSound (word) {
+  return word.endsWith('~') || word.endsWith('～')
+        || word.endsWith('-') || word.endsWith('—')
+        || word.endsWith('！') || word.endsWith('!');
+}
+
 function printTransDict (transDict) {
   var s = ""
   for (var key in transDict) {
     if (Object.hasOwn (transDict, key)) {
-      s += key + " => " + transDict[key] + "\n";
+      var value = transDict[key];
+      if (value && value != '' && !isSound(value) && (key != value)) {
+        s += key + " => " + value + "\n";
+      }
     }
   }
   return s;
@@ -111,6 +136,7 @@ const translator = {
   minCount: 2,
   serverUrl: 'http://localhost:8080',
   indexUrl: 'https://books.fishhawk.top/novel/syosetu/n1165js',
+  kataDict: {},
 
   filterKata: function (word, count) {
     if (word.length < this.minWordLength) {
@@ -125,8 +151,10 @@ const translator = {
   },
 
   sakura: async function (sample_text, ja_text) {
-    var system_prompt = "你是一个轻小说翻译模型，可以流畅通顺地以日本轻小说的风格将日文翻译成简体中文，并联系上下文正确使用人称代词，不擅自添加原文中没有的代词。";
-    var user_prompt = "将下面的日文词语翻译成中文，专有名称请使用音译，不要使用英文或日文：";
+    //var system_prompt = "你是一个轻小说翻译模型，可以流畅通顺地以日本轻小说的风格将日文翻译成简体中文，并联系上下文正确使用人称代词，不擅自添加原文中没有的代词。";
+    var system_prompt = "你是一个轻小说翻译模型，可以流畅通顺地以日本轻小说的风格将日文翻译成简体中文。";
+    var sample_template = "分析以下日文文本中使用的词语：\n";
+    var user_prompt = "将下面的日文词语翻译成中文，禁止翻译成英文或日文：";
     var url = this.serverUrl + "/v1/chat/completions";
     const bodyObj = {
       "model":"",
@@ -135,8 +163,11 @@ const translator = {
             "role":"system",
             "content": system_prompt
         }, {
+            "role":"assistant",
+            "content": sample_template + sample_text
+        }, {
             "role":"user",
-            "content": sample_text + user_prompt + ja_text
+            "content": user_prompt + ja_text
         }],
       "temperature":0.1,
       "top_p":0.3,
@@ -158,20 +189,27 @@ const translator = {
     return data['choices'][0]['message']['content'].split('\n');
   },
 
-  translate: async function (kataDict, transDict) {
+  translateOne: async function (word) {
+    logStatus("逐行翻译： " + word);
+    const sample = this.kataDict[word];
+    const results = await this.sakura (sample, word);
+    return (results.length > 0) ? results[0] : word;
+  },
+
+  translate: async function (transDict) {
     var ja_text = "";
-    var sample_text = "分析以下日文文本中使用的词语：\n";
+    var sample_text = "";
     var n = 1;
     var index = 1;
-    var words = Object.keys(kataDict);
+    var words = Object.keys(this.kataDict);
     var last = words.length;
     var mapping = {};
     for (var i in words) {
       const word = words[i];
-      if (Object.hasOwn(kataDict, word)) {
+      if (Object.hasOwn(this.kataDict, word)) {
         ja_text += String(index) + '.' + word + '\n';
         mapping[index] = word;
-        const sample = kataDict[word];
+        const sample = this.kataDict[word];
         if (sample && sample.length > 0) {
           sample_text += sample + '\n';
         }
@@ -183,12 +221,18 @@ const translator = {
             if (lis.length == 2) {
               const lisi = Number(lis[0]);
               if (lisi) {
-                transDict[mapping[lisi]] = lis[1];
+                const jaWord = mapping[lisi];
+                var zhWord = lis[1];
+                if (jaWord == zhWord) {
+                  zhWord = await this.translateOne(jaWord);
+                }
+                transDict[jaWord] = zhWord;
               }
             }
           }
+          logStatus("完成度： " + n + " / " + last);
           ja_text = "";
-          sample_text = "分析以下日文文本：\n";
+          sample_text = "";
           index = 0;
         }
         index++;
@@ -197,19 +241,28 @@ const translator = {
     }
   },
 
+  doTranslate: async function () {
+    logStatus("开始翻译");
+    const transDict = {};
+    await this.translate (transDict);
+    var results = printTransDict(transDict);
+    var textarea = document.getElementById('results');
+    textarea.value = results;
+    textarea.rows = results.split('\n').length;
+  },
+
   process: async function () {
     const jmDict = await loadJmDictKata(this.minWordLength);
     const re = /[\u30a1-\u30fa\u30fc-\u30fe]+/g;
-    const kataDict = {};
     const counter = {};
-    const transDict = {};
-    const apiUrl = this.indexUrl.replace('/novel','/api/novel').replace('https://books.fishhawk.top/','http://localhost:8000/');
+    const apiUrl = this.indexUrl.replace('/novel','/api/novel').replace('https://books.fishhawk.top/','https://tonydns.ignorelist.com/');
     const response = await fetch(apiUrl);
     const body = await response.text();
     const index = JSON.parse(body);
     const title = index['titleJp'];
-    console.log("loaded " + title);
-    addList(kataDict, title, counter);
+    this.kataDict = {};
+    logStatus("加载： " + title);
+    addList(this.kataDict, title, counter);
     const toc = index['toc'];
     const glossary = index['glossary'];
     for (var ch in toc) {
@@ -220,25 +273,24 @@ const translator = {
         const chBody = await chResponse.text();
         const chData = JSON.parse(chBody);
         const chTitle = chData["titleJp"];
-        console.log("loaded " + chTitle);
-        addList(kataDict, chTitle, counter);
+        logStatus("加载： " + chTitle);
+        addList(this.kataDict, chTitle, counter);
         const paragraphs = chData['paragraphs']
         for (var p in chData['paragraphs']) {
           const line = paragraphs[p];
-          addList(kataDict, line, counter);
+          addList(this.kataDict, line, counter);
         }
       }
     }
-    for (var kata in kataDict) {
-      if (Object.hasOwn(kataDict, kata)) {
+    for (var kata in this.kataDict) {
+      if (Object.hasOwn(this.kataDict, kata)) {
         const count = counter[kata];
         if (Object.hasOwn(glossary, kata) || this.filterKata(kata, count) || jmDict.isWords(kata)) {
-          delete kataDict[kata];
+          delete this.kataDict[kata];
         }
       }
     }
-    await this.translate (kataDict, transDict);
-    document.getElementById('results').innerText = printTransDict(transDict);
+    await this.doTranslate();
   }
 
 };
@@ -253,8 +305,14 @@ function startProcess() {
   })();
 }
 
+function retry() {
+  (async () => {
+    translator.doTranslate();
+  })();
+}
+
 function copyResults() {
-  var copyText = document.getElementById("results").innerText;
+  var copyText = document.getElementById("results").value;
   navigator.clipboard.writeText(copyText);
 }
 
@@ -263,7 +321,12 @@ function copyResults() {
 <body class="bg-light">
   <div class="container">
     <div class="py-5 text-center">
-       <h2>术语表制作工具</h2>
+       <h2>Sakura 术语表制作工具</h2>
+    </div>
+    <div class="row">
+      <div class="col-md-12 order-md-1">
+        <p class="text-center">使用日语字典进行过滤，制作较短的术语表。仅支持 Sakura 翻译器。</p>
+      </div>
     </div>
     <div class="row">
        <div class="col-md-12 order-md-1">
@@ -281,13 +344,13 @@ function copyResults() {
               <div class="col-md-6 mb-3">
                <label for="minWordLength"><h4>最少字数：</h4></label>
                <p>
-               <input type="text" class="form-control" id="minWordLength" placeholder="3" value="3" required>
+               <input class="form-control" id="minWordLength" placeholder="2" value="2" type="number" required>
                </p>
              </div>
              <div class="col-md-6 mb-3">
                <label for="minCount"><h4>最少出现次数：</h4></label>
                <p>
-               <input type="text" class="form-control" id="minCount" placeholder="2" value="2" required>
+               <input class="form-control" id="minCount" placeholder="2" value="2" type="number" required>
                </p>
              </div>
             </div>
@@ -296,15 +359,21 @@ function copyResults() {
             </p>
           </div>
          </form>
-         <div class="page-header">
+         <div>
            <h3>制作结果:</h3>
          </div>
          <p>
            <button type="button" class="btn btn-default" onclick="javascript:copyResults();">复制</button>
+           <button type="button" class="btn btn-default" onclick="javascript:retry();">重翻</button>
          </p>
-         <div class="well">
-           <p id="results"></p>
+         <div class="well well-sm">
+           <p id="status"></p>
          </div>
+         <form>
+           <div class="form-group">
+            <textarea class="form-control" id="results" rows="3"></textarea>
+          </div>
+         </form>
        </div>
     </div>
 
